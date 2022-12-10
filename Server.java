@@ -4,72 +4,47 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.*;
 import java.util.ArrayList;
-import java.util.regex.PatternSyntaxException;
+import java.util.concurrent.Semaphore;
+
 
 
 public class Server {
-   static ArrayList<ClientHandler> clientList = new ArrayList<>();
+   static Semaphore semaphore = new Semaphore(1, true);
+   static ArrayList<GameLogic> gameSessionList = new ArrayList<>();
+   static int game_id = 1;
+   static int thread = 0;
 
     public static void main(String args[]) throws IOException {
-        int session_id = 1;
+        game_id=1;
         ServerSocket serverSocket = new ServerSocket(80);
         System.out.println("Server is running");
 
         while (true) {
             Socket socket = serverSocket.accept();
-            int cookie = sessionChecker(socket);
-            if(cookie!= -1){
-                //Sök i listan
-                for(ClientHandler client : clientList){
-                    if(client.getCookie() == cookie){
-
-                        client.setSocket(socket);
-
-                    }
-                }
-            } else {
-                ClientHandler clientSocket = new ClientHandler(socket, session_id);
-                System.out.println("New client");
-                new Thread(clientSocket).start();
-                clientList.add(clientSocket);
-                //Lägg till i listan
-            }  
+            ClientHandler clientSocket = new ClientHandler(socket, semaphore, thread);
+            thread++;
+            System.out.println("New client");
+            new Thread(clientSocket).start();              
         }
         // serverSocket.close();
 
     }
-
-    private static int sessionChecker(Socket clientSocket) throws IOException{
-        BufferedReader inFromClient = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-        String line = "";
-        char[] buffer = new char[1000];
-        int charsRead = 0;
-        while ((charsRead = inFromClient.read(buffer)) != -1) {
-            if (charsRead < 1000) {
-                line += String.valueOf(buffer).substring(0, charsRead);
-                break;
-            } else {
-                line += String.valueOf(buffer);
-            }
-        } 
-        return extractCookie(line);
-    }
-    private static int extractCookie(String httpResponse) {
-        try {
-            String[] arr = httpResponse.split("user-cookie=", 2);
-            System.out.println(arr[1] + " " + arr[1].length());
-            return (int) Integer.parseInt(arr[1]);
-        } catch(PatternSyntaxException error){
-            return -1;
-        }  catch(IndexOutOfBoundsException error){
-            return -1;
-        } 
-    }
+    
 }
 
 
 
 class ClientHandler implements Runnable {
+    private int name;
+    private static final int NOT_CHECKED = -2;
+    private Socket clientSocket;
+    PrintWriter outToClient;
+    BufferedReader inFromClient;  
+    final String CRLF = "\r\n";
+    private int cookie = NOT_CHECKED;
+    private GameLogic game; 
+    private Semaphore sem;
+ 
 
     String startPage = "<html>" + "\n"
             + "<head>" + "\n"
@@ -84,55 +59,97 @@ class ClientHandler implements Runnable {
             + "</body>" + "\n"
             + "</html>";
 
-    final String CRLF = "\r\n";
-    private int cookie;
-    private GameLogic game = new GameLogic(cookie);
-    private Socket clientSocket;
 
-
-    public ClientHandler(Socket socket, int cookie) {
+    public ClientHandler(Socket socket, Semaphore sem, int name) {
         clientSocket = socket;
-        this.cookie = cookie;
+        this.sem = sem;
+        this.name = name;
     }
 
     public int getCookie(){
         return cookie;
     }
 
-    public void setSocket(Socket socket){
-        clientSocket = socket;
-    }
-
     @Override
     public void run() {
-
         try {
-            PrintWriter outToClient = new PrintWriter(clientSocket.getOutputStream());
-            BufferedReader inFromClient = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+
+           PrintWriter outToClient1 = new PrintWriter(clientSocket.getOutputStream());
+           BufferedReader inFromClient1 = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
             String line = "";
             char[] buffer = new char[1000];
             int charsRead = 0;
-            while ((charsRead = inFromClient.read(buffer)) != -1) {
+           
+            while ((charsRead = inFromClient1.read(buffer)) != -1) {
                 if (charsRead < 1000) {
                     line += String.valueOf(buffer).substring(0, charsRead);
                     break;
-                } else {
+                } else {   
                     line += String.valueOf(buffer);
                 }
             }
+            
+          
+            if(!isFaviconRequest(line)){
+                if(cookie == NOT_CHECKED){
+                    cookie = extractCookie(line);
+                }
 
-            System.out.println(line);
-            if (checkIfPOST(line)) {
-                String resp = game.giveFeedbackOnGuess(extractNumber(line));
-                outToClient.print(createHTTPResponse(generateGuessedPage(resp)));
-                outToClient.flush();
-            }  else {
-                outToClient.print(createHTTPResponse(startPage));
-                outToClient.flush();
+                if(cookie != -1){
+                    sem.acquire();
+                    System.out.println("We are here");
+                    System.out.println("Cookie: " + cookie);
+                    System.out.println("Semaphore acquired for thread" + name); 
+                    System.out.println("List length: " + Server.gameSessionList.size());
+                    for(GameLogic g : Server.gameSessionList){
+                        System.out.println(g.getGameID());
+                        if(g.getGameID() == cookie){
+                            System.out.println("Found game");
+                            this.game = g;
+                           
+                        }
+                    }
+                } else {
+                    this.game = new GameLogic(Server.game_id);
+                    Server.gameSessionList.add(game);
+                    Server.game_id++;
+                    System.out.println("New game added: "+ game + " Game id:" + game.getGameID()); 
+                    sem.release();
+                    System.out.println("Semaphore released"); 
+                }
+    
+                if (checkIfPOST(line)) {
+                    String resp = game.giveFeedbackOnGuess(extractNumber(line));
+                    outToClient1.print(createHTTPResponse(generateGuessedPage(resp), game.getGameID()));
+                    outToClient1.flush();
+                }  else {
+                    outToClient1.print(createHTTPResponse((startPage), game.getGameID()));
+                    outToClient1.flush();
+                }
+
             }
+            
+            
         } catch (IOException e) {
 
+        } catch (InterruptedException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+            System.out.println("Semaphore error");
         }
+    }
+
+    private static int extractCookie(String httpResponse) {
+        if(httpResponse.contains("user-cookie=")){
+            String[] arr = httpResponse.split("user-cookie=", 2);
+            System.out.println("Cookie found: " + arr[1].charAt(0));
+            return ((int) arr[1].charAt(0)) - 48;  
+        }
+        return -1;
+}
+
+    private boolean isFaviconRequest(String httpRequest){
+        return httpRequest.contains("GET /favicon");
     }
 
     private String generateGuessedPage(String result){
@@ -153,9 +170,9 @@ class ClientHandler implements Runnable {
             return guessedPage;
     }
 
-    private String createHTTPResponse(String body) {
+    private String createHTTPResponse(String body, int cookie_id) {
         String response = "HTTP/1.1 200 OK" + CRLF +
-                "Content-Length: " + body.getBytes().length + CRLF + "Content-Type: text/html" + CRLF + "Connection: keep-alive" + CRLF + "Set-Cookie: user-cookie=" + cookie + CRLF +
+                "Content-Length: " + body.getBytes().length + CRLF + "Content-Type: text/html" + CRLF + "Connection: keep-alive" + CRLF + "Set-Cookie: user-cookie=" + cookie_id + CRLF +
                 CRLF +
                 body + CRLF + CRLF;
         return response;
@@ -173,65 +190,22 @@ class ClientHandler implements Runnable {
 }
 
 
-class SessionChecker implements Runnable {
-    private Socket clientSocket;
-    public SessionChecker(Socket socket) {
-        clientSocket = socket;  
-    }
-
-    @Override
-    public void run() {
-        try {
-            PrintWriter outToClient = new PrintWriter(clientSocket.getOutputStream());
-            BufferedReader inFromClient = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-            String line = "";
-            char[] buffer = new char[1000];
-            int charsRead = 0;
-            while ((charsRead = inFromClient.read(buffer)) != -1) {
-                if (charsRead < 1000) {
-                    line += String.valueOf(buffer).substring(0, charsRead);
-                    break;
-                } else {
-                    line += String.valueOf(buffer);
-                }
-            } 
-            int cookie = extractCookie(line);
-            if(cookie != -1){
-
-
-            } else {
-
-            }
-
-
-        } catch (IOException e) {
-
-        }
-    }
-    private int extractCookie(String httpResponse) {
-        try {
-            String[] arr = httpResponse.split("user-cookie=", 2);
-            System.out.println(arr[1] + " " + arr[1].length());
-            return (int) Integer.parseInt(arr[1]);
-        } catch(PatternSyntaxException error){
-            return -1;
-        } 
-    }
-}
-
-
 class GameLogic {
-    private int session_id;
+    private int game_id;
     private int correctNumber;
+    private String latestGuess;
     private int numberOfGuesses;
 
-    public GameLogic(int session_id) {
-        this.session_id = session_id;
+    public GameLogic(int game_id) {
+        this.game_id = game_id;
         this.correctNumber = (int) (Math.random() * 100);
         numberOfGuesses = 0;
         System.out.println("New game object");
     }
-
+    
+    public int getGameID(){
+        return game_id;
+    }
     public int getCorrectNumber() {
         return correctNumber;
     }
@@ -239,15 +213,19 @@ class GameLogic {
         return numberOfGuesses;
     }
 
-    private int checkNumber(double number) {
+    public String getLatestGuess() {
+        return latestGuess;
+    }
 
+    private int checkNumber(double number) {
+        numberOfGuesses++;
         if (number < correctNumber) {
             return -1;
         } else if (number > correctNumber) {
             return 1;
         } else {
             return 0;
-        }
+        }  
     }
 
     public String giveFeedbackOnGuess(double userGuess) {
@@ -266,6 +244,7 @@ class GameLogic {
                 output = "You guessed it!";
                 break;
         }
+        latestGuess = output;
         return output;
     }
 
