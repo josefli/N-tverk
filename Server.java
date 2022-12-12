@@ -12,7 +12,6 @@ public class Server {
    static Semaphore semaphore = new Semaphore(1, true);
    static ArrayList<GameLogic> gameSessionList = new ArrayList<>();
    static int game_id = 1;
-   static int thread = 0;
 
     public static void main(String args[]) throws IOException {
         game_id=1;
@@ -21,8 +20,7 @@ public class Server {
 
         while (true) {
             Socket socket = serverSocket.accept();
-            ClientHandler clientSocket = new ClientHandler(socket, semaphore, thread);
-            thread++;
+            ClientHandler clientSocket = new ClientHandler(socket, semaphore);
             System.out.println("New client");
             new Thread(clientSocket).start();              
         }
@@ -35,8 +33,8 @@ public class Server {
 
 
 class ClientHandler implements Runnable {
-    private int name;
     private static final int NOT_CHECKED = -2;
+    private boolean cookie_exists = false;
     private Socket clientSocket;
     PrintWriter outToClient;
     BufferedReader inFromClient;  
@@ -60,20 +58,14 @@ class ClientHandler implements Runnable {
             + "</html>";
 
 
-    public ClientHandler(Socket socket, Semaphore sem, int name) {
+    public ClientHandler(Socket socket, Semaphore sem) {
         clientSocket = socket;
         this.sem = sem;
-        this.name = name;
-    }
-
-    public int getCookie(){
-        return cookie;
     }
 
     @Override
     public void run() {
         try {
-
            PrintWriter outToClient1 = new PrintWriter(clientSocket.getOutputStream());
            BufferedReader inFromClient1 = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
             String line = "";
@@ -82,51 +74,52 @@ class ClientHandler implements Runnable {
            
             while ((charsRead = inFromClient1.read(buffer)) != -1) {
                 if (charsRead < 1000) {
+                    System.out.println("Request is " + charsRead + "chars.");
                     line += String.valueOf(buffer).substring(0, charsRead);
                     break;
                 } else {   
+                    System.out.println("Request is 1000 chars.");
                     line += String.valueOf(buffer);
                 }
             }
             
-          
             if(!isFaviconRequest(line)){
                 if(cookie == NOT_CHECKED){
                     cookie = extractCookie(line);
+                    if(cookie != -1){
+                        cookie_exists = true;
+                    }
                 }
-
-                if(cookie != -1){
-                    sem.acquire();
-                    System.out.println("We are here");
-                    System.out.println("Cookie: " + cookie);
-                    System.out.println("Semaphore acquired for thread" + name); 
-                    System.out.println("List length: " + Server.gameSessionList.size());
+                sem.acquire();
+                if(cookie_exists){                    
                     for(GameLogic g : Server.gameSessionList){
-                        System.out.println(g.getGameID());
                         if(g.getGameID() == cookie){
-                            System.out.println("Found game");
-                            this.game = g;
-                           
+                            this.game = g; 
+                            System.out.println("Existing game: " + g.getGameID());
                         }
                     }
                 } else {
                     this.game = new GameLogic(Server.game_id);
+                    System.out.println("New game: " + game.getGameID());
                     Server.gameSessionList.add(game);
                     Server.game_id++;
-                    System.out.println("New game added: "+ game + " Game id:" + game.getGameID()); 
-                    sem.release();
-                    System.out.println("Semaphore released"); 
                 }
+                sem.release();
     
                 if (checkIfPOST(line)) {
+                    System.out.println("Request is POST");
                     String resp = game.giveFeedbackOnGuess(extractNumber(line));
-                    outToClient1.print(createHTTPResponse(generateGuessedPage(resp), game.getGameID()));
+                    outToClient1.print(createHTTPResponse(generateGuessedPage(resp, game.getNumberOfGuesses()), game.getGameID()));
                     outToClient1.flush();
-                }  else {
+                }  else if(cookie_exists){
+                    System.out.println("New tab, existing game");
+                    outToClient1.print(createHTTPResponse(generateGuessedPage(game.getLatestGuess(), game.getNumberOfGuesses()), game.getGameID()));
+                    outToClient1.flush();
+                } else {
+                    System.out.println("Request is GET");
                     outToClient1.print(createHTTPResponse((startPage), game.getGameID()));
                     outToClient1.flush();
                 }
-
             }
             
             
@@ -135,14 +128,14 @@ class ClientHandler implements Runnable {
         } catch (InterruptedException e) {
             // TODO Auto-generated catch block
             e.printStackTrace();
-            System.out.println("Semaphore error");
+            System.err.println("Semaphore error");
         }
     }
 
     private static int extractCookie(String httpResponse) {
         if(httpResponse.contains("user-cookie=")){
             String[] arr = httpResponse.split("user-cookie=", 2);
-            System.out.println("Cookie found: " + arr[1].charAt(0));
+            //Funkar enbart om cookie är 0-9
             return ((int) arr[1].charAt(0)) - 48;  
         }
         return -1;
@@ -152,21 +145,21 @@ class ClientHandler implements Runnable {
         return httpRequest.contains("GET /favicon");
     }
 
-    private String generateGuessedPage(String result){
+    private String generateGuessedPage(String result, int numberOfGuesses){
         String guessedPage = "<html>" + "\n"
             + "<head>" + "\n"
             + "<title>Number guessing game</title>" + "\n"
             + "</head>" + "\n"
             + "<body>" + "\n"
             + "<h1>Number guessing game</h1>" + "\n"
-            + "<p>" + result + "</p>\n" 
+            + "<p>" + result + "</p>\n"
+            + "<p>You have guessed" + numberOfGuesses + "times.</p>\n"  
             + "<form name=\"guessform\" method =\"POST\">" + "\n"
             + "<input type =\"text\" id=\"guess\" name=\"guess\">" + "\n"
             + "<input type=\"submit\" value=\"Guess\">" + "\n"
             + "</form>" + "\n"
             + "</body>" + "\n"
             + "</html>";
-
             return guessedPage;
     }
 
@@ -184,8 +177,11 @@ class ClientHandler implements Runnable {
 
     private double extractNumber(String httpResponse) {
         String[] arr = httpResponse.split("guess=", 2);
-        System.out.println(arr[1] + " " + arr[1].length());
         return Integer.parseInt(arr[1]);
+    }
+
+    public int getCookie(){
+        return cookie;
     }
 }
 
